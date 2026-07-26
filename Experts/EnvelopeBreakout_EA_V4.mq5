@@ -94,6 +94,8 @@ bool     g_safetyActive = false; // modo seguranca ativo? (existe pelo menos 1 c
 int      g_setCount = 0;             // quantos conjuntos de seguranca (par absorvida+defesa) ja foram formados
 ulong    g_absorbedTickets[];        // tickets de posicoes normais absorvidas pelo modo seguranca
 
+double   g_safetyRealizedProfit = 0.0; // lucro liquido ja realizado (fechamentos normais) durante o modo seguranca ativo
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -111,6 +113,7 @@ int OnInit()
 
    g_safetyActive = false;
    g_setCount = 0;
+   g_safetyRealizedProfit = 0.0;
    ArrayResize(g_absorbedTickets, 0);
 
    return(INIT_SUCCEEDED);
@@ -237,6 +240,32 @@ void OpenBuy()
 }
 
 //+------------------------------------------------------------------+
+//| Fecha uma posicao normal e, se o modo seguranca estiver ativo no  |
+//| momento, acumula o lucro liquido realizado (lucro + swap - custo  |
+//| estimado) para que ele seja somado ao valor flutuante total ao    |
+//| avaliar a meta InpSafetyCloseProfit - o lucro de ciclos normais   |
+//| que vao fechando durante o modo seguranca nao pode "sumir" so     |
+//| porque a posicao deixou de existir.                               |
+//+------------------------------------------------------------------+
+void CloseNormalPosition(ulong ticket)
+{
+   bool wasSafetyActive = g_safetyActive;
+
+   if(!trade.PositionClose(ticket)) return;
+
+   if(!wasSafetyActive) return;
+
+   ulong dealTicket = trade.ResultDeal();
+   if(dealTicket == 0 || !HistoryDealSelect(dealTicket)) return;
+
+   double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+   double swap   = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+   double volume = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+
+   g_safetyRealizedProfit += profit + swap - volume * InpCommissionPerLotRoundTurn;
+}
+
+//+------------------------------------------------------------------+
 //| Verifica as posicoes normais ATIVAS (nao absorvidas) e fecha as   |
 //| que atingiram o alvo dinamico, tocaram a banda oposta, OU cujo    |
 //| preco de entrada foi "alcancado" pela banda (a banda se deslocou  |
@@ -266,14 +295,14 @@ void CheckExits()
          // fecha se: alvo dinamico atingido, OU preco tocou a banda inferior atual,
          // OU a banda inferior subiu e alcancou/ultrapassou o preco de entrada da venda
          if(bid <= g_targetSell || bid <= g_lastLower || g_lastLower >= entryPrice)
-            trade.PositionClose(ticket);
+            CloseNormalPosition(ticket);
       }
       else if(type == POSITION_TYPE_BUY)
       {
          // fecha se: alvo dinamico atingido, OU preco tocou a banda superior atual,
          // OU a banda superior desceu e alcancou/ultrapassou o preco de entrada da compra
          if(ask >= g_targetBuy || ask >= g_lastUpper || g_lastUpper <= entryPrice)
-            trade.PositionClose(ticket);
+            CloseNormalPosition(ticket);
       }
    }
 }
@@ -391,6 +420,7 @@ void CloseAllSafetyPositions()
 
    g_safetyActive = false;
    g_setCount     = 0;
+   g_safetyRealizedProfit = 0.0;
    ClearAbsorbed();
    Print("MODO SEGURANCA: meta atingida -> todas as posicoes fechadas");
 }
@@ -424,6 +454,10 @@ void CheckSafetyExit()
 
    // custo estimado de comissao (ida+volta) de todas as posicoes envolvidas
    total -= totalLots * InpCommissionPerLotRoundTurn;
+
+   // soma o lucro liquido ja realizado por ciclos normais fechados durante o modo seguranca -
+   // esse valor nao pode ser perdido so porque a posicao que o gerou ja foi encerrada
+   total += g_safetyRealizedProfit;
 
    if(total >= InpSafetyCloseProfit)
       CloseAllSafetyPositions();
@@ -465,7 +499,8 @@ void UpdatePanel()
       totalLots  += PositionGetDouble(POSITION_VOLUME);
    }
 
-   double totalNet = totalFloat - totalLots * InpCommissionPerLotRoundTurn;
+   double totalNet     = totalFloat - totalLots * InpCommissionPerLotRoundTurn;
+   double totalWithReal = totalNet + g_safetyRealizedProfit;
 
    string txt = "\n\n"; // espaco para nao sobrepor a barra de cotacao nativa do MT5 (topo do grafico)
    txt += "=== Envelope Breakout EA ===\n";
@@ -477,7 +512,11 @@ void UpdatePanel()
    txt += "Valor flutuante bruto: " + DoubleToString(totalFloat, 2) + "\n";
    txt += "Valor flutuante liquido (c/ custo estimado): " + DoubleToString(totalNet, 2) + "\n";
    if(g_safetyActive)
+   {
+      txt += "Lucro ja realizado no modo seguranca: " + DoubleToString(g_safetyRealizedProfit, 2) + "\n";
+      txt += "Total considerado para a meta: " + DoubleToString(totalWithReal, 2) + "\n";
       txt += "Meta para fechar tudo: " + DoubleToString(InpSafetyCloseProfit, 2) + "\n";
+   }
 
    // mostra o proximo nivel de gatilho, se houver posicao normal ativa no momento
    ulong  watchTicket;
