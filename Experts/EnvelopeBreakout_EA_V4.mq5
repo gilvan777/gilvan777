@@ -77,6 +77,10 @@ input ulong  InpHedgeMagicNumber  = 20260726; // Numero magico da posicao de def
 input double InpCommissionPerLotRoundTurn = 0.0; // Custo estimado (comissao ida+volta) por lote, em moeda da conta
 input double InpSafetyCloseProfit = 50.0;  // Valor (moeda da conta) para fechar TUDO quando o modo seguranca estiver ativo
 
+input group "=== Protecao / Limites (anti-blowup) ==="
+input int    InpMaxSafetySets    = 2;      // Maximo de conjuntos de seguranca simultaneos permitidos
+input double InpMaxFloatingLoss  = 200.0;  // Perda maxima total (moeda da conta) -> fecha TUDO em emergencia (0 = desativado)
+
 //--- GLOBAIS ------------------------------------------------------------
 CTrade   trade;
 int      envHandle = INVALID_HANDLE;
@@ -172,6 +176,10 @@ void ProcessNewBar()
 
    // --- sinais de entrada baseados no fechamento do candle anterior ---
    if(HasOpenPosition()) return; // apenas 1 ordem por vez (posicoes normais)
+
+   // trava anti-blowup: ja atingiu o teto de conjuntos de seguranca simultaneos?
+   // nao abre novo ciclo normal ate o modo seguranca ser resolvido (fechar tudo)
+   if(g_safetyActive && g_setCount >= InpMaxSafetySets) return;
 
    if(close1 > upper1)
    {
@@ -354,6 +362,8 @@ void OpenHedgePosition(ENUM_POSITION_TYPE hedgeType)
    trade.SetExpertMagicNumber(InpMagicNumber);
 }
 
+void CloseAllSafetyPositions(); // forward declaration (definida mais abaixo)
+
 //+------------------------------------------------------------------+
 //| A cada tick, olha a posicao normal ATIVA no momento (se houver).  |
 //| Se o preco andou contra ela ate seu preco de entrada +/- offset   |
@@ -361,7 +371,7 @@ void OpenHedgePosition(ENUM_POSITION_TYPE hedgeType)
 //| normal definitivamente) e forma-se um NOVO conjunto de seguranca: |
 //| a posicao absorvida + uma posicao de defesa recem-aberta.         |
 //| Isso pode se repetir varias vezes, cada vez formando um conjunto  |
-//| independente (varios conjuntos podem coexistir).                 |
+//| independente, ate o limite InpMaxSafetySets.                      |
 //+------------------------------------------------------------------+
 void CheckSafetyTrigger()
 {
@@ -387,6 +397,16 @@ void CheckSafetyTrigger()
    }
 
    if(!breached) return;
+
+   // trava anti-blowup: essa posicao normal (aberta antes da pausa de novas entradas
+   // valer) tambem rompeu o offset, mas o teto de conjuntos ja foi atingido - em vez
+   // de formar mais um conjunto sem controle, fecha TUDO agora (de-risk imediato)
+   if(g_setCount >= InpMaxSafetySets)
+   {
+      Print("MODO SEGURANCA: limite de ", InpMaxSafetySets, " conjunto(s) atingido -> fechando tudo para nao formar novo conjunto");
+      CloseAllSafetyPositions();
+      return;
+   }
 
    // absorve a posicao normal atual para dentro de um novo conjunto de seguranca
    AddAbsorbed(ticket);
@@ -460,7 +480,18 @@ void CheckSafetyExit()
    total += g_safetyRealizedProfit;
 
    if(total >= InpSafetyCloseProfit)
+   {
       CloseAllSafetyPositions();
+      return;
+   }
+
+   // circuit breaker: perda maxima total atingida -> fecha tudo em emergencia,
+   // mesmo sem bater a meta de lucro (protege a conta de um blowup)
+   if(InpMaxFloatingLoss > 0.0 && total <= -InpMaxFloatingLoss)
+   {
+      Print("MODO SEGURANCA: perda maxima de ", DoubleToString(InpMaxFloatingLoss, 2), " atingida -> fechando tudo em emergencia");
+      CloseAllSafetyPositions();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -505,7 +536,7 @@ void UpdatePanel()
    string txt = "\n\n"; // espaco para nao sobrepor a barra de cotacao nativa do MT5 (topo do grafico)
    txt += "=== Envelope Breakout EA ===\n";
    txt += "Modo Seguranca: " + (g_safetyActive ? "ATIVO" : "inativo") + "\n";
-   txt += "Conjuntos de seguranca formados: " + IntegerToString(g_setCount) + "\n";
+   txt += "Conjuntos de seguranca: " + IntegerToString(g_setCount) + " / " + IntegerToString(InpMaxSafetySets) + "\n";
    txt += "Posicoes normais ativas: " + IntegerToString(activeNormalCount) + "\n";
    txt += "Posicoes absorvidas: " + IntegerToString(absorbedCount) + "\n";
    txt += "Posicoes de defesa abertas: " + IntegerToString(hedgeCount) + "\n";
@@ -515,7 +546,11 @@ void UpdatePanel()
    {
       txt += "Lucro ja realizado no modo seguranca: " + DoubleToString(g_safetyRealizedProfit, 2) + "\n";
       txt += "Total considerado para a meta: " + DoubleToString(totalWithReal, 2) + "\n";
-      txt += "Meta para fechar tudo: " + DoubleToString(InpSafetyCloseProfit, 2) + "\n";
+      txt += "Meta para fechar tudo (lucro): " + DoubleToString(InpSafetyCloseProfit, 2) + "\n";
+      if(InpMaxFloatingLoss > 0.0)
+         txt += "Limite de perda (emergencia): -" + DoubleToString(InpMaxFloatingLoss, 2) + "\n";
+      if(g_setCount >= InpMaxSafetySets)
+         txt += "AVISO: teto de conjuntos atingido - novas entradas normais pausadas\n";
    }
 
    // mostra o proximo nivel de gatilho, se houver posicao normal ativa no momento
