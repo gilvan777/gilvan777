@@ -60,6 +60,9 @@ input int    InpMaxMartingaleSteps   = 4;     // Maximo de lances de martingale 
 input double InpCommissionPerLotRoundTurn = 0.0; // Custo estimado (comissao ida+volta) por lote, em moeda da conta
 input double InpMartingaleCloseProfit = 50.0; // Valor (moeda da conta) para fechar TODO o grupo quando o martingale estiver ativo
 
+input group "=== Protecao / Limite (anti-blowup) ==="
+input double InpMaxFloatingLoss = 200.0; // Perda maxima total do grupo (moeda da conta) -> fecha TUDO em emergencia (0 = desativado)
+
 //--- GLOBAIS ------------------------------------------------------------
 CTrade   trade;
 int      envHandle = INVALID_HANDLE;
@@ -351,7 +354,18 @@ void CheckGroupExit()
    total -= totalLots * InpCommissionPerLotRoundTurn;
 
    if(total >= InpMartingaleCloseProfit)
+   {
       CloseGroup();
+      return;
+   }
+
+   // circuit breaker: perda maxima do grupo atingida -> fecha tudo em emergencia,
+   // mesmo sem bater a meta de lucro (protege a conta do crescimento geometrico do lote)
+   if(InpMaxFloatingLoss > 0.0 && total <= -InpMaxFloatingLoss)
+   {
+      Print("MARTINGALE: perda maxima de ", DoubleToString(InpMaxFloatingLoss, 2), " atingida -> fechando grupo em emergencia");
+      CloseGroup();
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -412,7 +426,11 @@ void UpdatePanel()
    txt += "Valor flutuante bruto: " + DoubleToString(totalFloat, 2) + "\n";
    txt += "Valor flutuante liquido (c/ custo estimado): " + DoubleToString(totalNet, 2) + "\n";
    if(g_martingaleActive)
-      txt += "Meta para fechar o grupo: " + DoubleToString(InpMartingaleCloseProfit, 2) + "\n";
+   {
+      txt += "Meta para fechar o grupo (lucro): " + DoubleToString(InpMartingaleCloseProfit, 2) + "\n";
+      if(InpMaxFloatingLoss > 0.0)
+         txt += "Limite de perda (emergencia): -" + DoubleToString(InpMaxFloatingLoss, 2) + "\n";
+   }
 
    if(g_lastLegTicket != 0 && PositionSelectByTicket(g_lastLegTicket))
    {
